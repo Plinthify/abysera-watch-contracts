@@ -1,6 +1,6 @@
 {
   "name": "@abysera/watch-contracts",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Shared watch and wake payload schemas for Abysera services and MCP servers.",
   "license": "MIT",
   "type": "module",
