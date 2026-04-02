@@ -50,6 +50,18 @@ type WatchConditionInput =
       evalFrequency: string;
     };
 
+type ActionEnvelope = {
+  type: string;
+  params: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+};
+
+type ActionEnvelopeInput = {
+  type: string;
+  params?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+};
+
 const NumericComparisonConditionSchema = z.object({
   op: z.enum(['gt', 'lt', 'gte', 'lte', 'eq']),
   value: z.number().finite(),
@@ -129,16 +141,13 @@ export const WatchConditionSchema: z.ZodType<WatchConditionInput> = z.lazy(() =>
   ])
 );
 
-export const TradeActionSchema = z.object({
-  type: z.enum(['market_order', 'limit_order', 'cancel_order', 'modify_order']),
-  symbol: z.string().min(1),
-  side: z.enum(['buy', 'sell']),
-  quantity: z.number().positive(),
-  price: z.number().positive().optional(),
-  stopLoss: z.number().positive().optional(),
-  takeProfit: z.number().positive().optional(),
+const ActionEnvelopeSchema = z.object({
+  type: z.string().min(1),
+  params: JsonRecordSchema.default({}),
   metadata: JsonRecordSchema.optional(),
 });
+
+export const ActionSchema: z.ZodType<ActionEnvelope, z.ZodTypeDef, ActionEnvelopeInput> = ActionEnvelopeSchema;
 
 export const WatchExecutionSchema = z.discriminatedUnion('mode', [
   z.object({
@@ -146,7 +155,7 @@ export const WatchExecutionSchema = z.discriminatedUnion('mode', [
   }),
   z.object({
     mode: z.literal('execute_immediately'),
-    action: TradeActionSchema,
+    action: ActionSchema,
   }),
 ]);
 
@@ -226,7 +235,7 @@ export const WakePayloadSchema = WakePayloadBaseSchema.transform(({ snapshot, so
   resumeContext: resumeContext ?? {},
 }));
 
-export type TradeAction = z.infer<typeof TradeActionSchema>;
+export type Action = z.infer<typeof ActionSchema>;
 export type WatchExecution = z.infer<typeof WatchExecutionSchema>;
 export type DataSource = z.infer<typeof DataSourceSchema>;
 export type TimeSource = z.infer<typeof TimeSourceSchema>;
