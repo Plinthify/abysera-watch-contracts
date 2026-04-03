@@ -162,7 +162,7 @@ export const WatchExecutionSchema = z.discriminatedUnion('mode', [
 export const WatchTriggerSchema = z.object({
   cooldown: z.string().min(1),
   sustainedFor: z.string().min(1).optional(),
-  maxFires: z.number().int().positive().optional(),
+  maxFires: z.union([z.literal(-1), z.number().int().positive()]).optional(),
   fireOnce: z.boolean().optional(),
   activeWindow: z.object({
     days: z.array(z.string()).optional(),
@@ -191,10 +191,24 @@ export const WatchSpecSchema = z.object({
   resumeContext: JsonRecordSchema,
 });
 
+export const DispatchErrorInfoSchema = z.object({
+  attempt: z.number().int().positive(),
+  message: z.string().min(1),
+  timestamp: z.string().datetime({ offset: true }),
+});
+
+export const DispatchContextSchema = z.object({
+  idempotencyKey: z.string().min(1),
+  attempt: z.number().int().positive(),
+  maxAttempts: z.number().int().positive(),
+  retriedAfterErrors: z.number().int().min(0),
+  priorErrors: z.array(DispatchErrorInfoSchema).default([]),
+});
+
 export function normalizeWatchTrigger<T extends Record<string, unknown>>(
   trigger: T,
 ): Omit<T, 'fireOnce'> {
-  const { fireOnce, ...rest } = trigger;
+  const { fireOnce, maxFires, ...rest } = trigger;
   if (fireOnce) {
     return {
       ...rest,
@@ -202,7 +216,14 @@ export function normalizeWatchTrigger<T extends Record<string, unknown>>(
     } as Omit<T, 'fireOnce'>;
   }
 
-  return rest as Omit<T, 'fireOnce'>;
+  if (maxFires === -1) {
+    return rest as Omit<T, 'fireOnce'>;
+  }
+
+  return {
+    ...rest,
+    ...(maxFires === undefined ? {} : { maxFires }),
+  } as Omit<T, 'fireOnce'>;
 }
 
 export function normalizeWatchSpec<T extends Record<string, unknown>>(
@@ -227,12 +248,14 @@ const WakePayloadBaseSchema = z.object({
   sourceSnapshot: JsonRecordSchema.optional(),
   marketSnapshot: JsonRecordSchema.optional(),
   resumeContext: JsonRecordSchema.optional(),
+  dispatchContext: DispatchContextSchema.optional(),
 });
 
-export const WakePayloadSchema = WakePayloadBaseSchema.transform(({ snapshot, sourceSnapshot, marketSnapshot, resumeContext, ...rest }: z.input<typeof WakePayloadBaseSchema>) => ({
+export const WakePayloadSchema = WakePayloadBaseSchema.transform(({ snapshot, sourceSnapshot, marketSnapshot, resumeContext, dispatchContext, ...rest }: z.input<typeof WakePayloadBaseSchema>) => ({
   ...rest,
   snapshot: snapshot ?? sourceSnapshot ?? marketSnapshot ?? {},
   resumeContext: resumeContext ?? {},
+  ...(dispatchContext ? { dispatchContext } : {}),
 }));
 
 export type Action = z.infer<typeof ActionSchema>;
