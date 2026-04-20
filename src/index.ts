@@ -49,8 +49,80 @@ function normalizeDurationString(value: string): string | null {
   return `${match[1]}${unit}`;
 }
 
-type BaseDataSourceInput = {
-  type: string;
+type PriceSourceInput = {
+  type: 'price';
+  symbol: string;
+  field: 'last' | 'bid' | 'ask' | 'vwap' | 'open' | 'high' | 'low' | 'close';
+  [key: string]: unknown;
+};
+
+type IndicatorSourceInput = {
+  type: 'indicator';
+  symbol: string;
+  timeframe?: string;
+  indicator: string;
+  params: Record<string, number>;
+  [key: string]: unknown;
+};
+
+type SpreadSourceInput = {
+  type: 'spread';
+  symbolA: string;
+  symbolB: string;
+  calc: 'ratio' | 'diff' | 'pct';
+  [key: string]: unknown;
+};
+
+type VolumeSourceInput = {
+  type: 'volume';
+  symbol: string;
+  window: string;
+  [key: string]: unknown;
+};
+
+type OrderbookSourceInput = {
+  type: 'orderbook';
+  symbol: string;
+  field: 'depth_imbalance' | 'spread_pct' | 'bid_wall' | 'ask_wall';
+  [key: string]: unknown;
+};
+
+type VolatilitySourceInput = {
+  type: 'volatility';
+  symbol: string;
+  window: string;
+  calc: 'realized' | 'atr' | 'iv';
+  [key: string]: unknown;
+};
+
+type CorrelationSourceInput = {
+  type: 'correlation';
+  symbolA: string;
+  symbolB: string;
+  window: string;
+  [key: string]: unknown;
+};
+
+type PortfolioSourceInput = {
+  type: 'portfolio';
+  field: 'total_pnl' | 'position_pnl' | 'drawdown' | 'exposure' | 'unrealized_pnl';
+  symbol?: string;
+  [key: string]: unknown;
+};
+
+type NewsSourceInput = {
+  type: 'news';
+  keywords: string[];
+  sources?: string[];
+  [key: string]: unknown;
+};
+
+type SentimentSourceInput = {
+  type: 'sentiment';
+  subject: string;
+  sources?: string[];
+  window?: string;
+  evalFrequency: string;
   [key: string]: unknown;
 };
 
@@ -74,15 +146,29 @@ type TimeScheduleInput = string | CronTimeScheduleInput | EveryTimeScheduleInput
 type TimeSourceInput = {
   type: 'time';
   schedule: TimeScheduleInput;
+  [key: string]: unknown;
 };
 
 type CustomSourceInput = {
   type: 'custom';
   resolver: string;
   params: Record<string, unknown>;
+  [key: string]: unknown;
 };
 
-type DataSourceInput = BaseDataSourceInput | TimeSourceInput | CustomSourceInput;
+type DataSourceInput =
+  | PriceSourceInput
+  | IndicatorSourceInput
+  | SpreadSourceInput
+  | VolumeSourceInput
+  | OrderbookSourceInput
+  | VolatilitySourceInput
+  | CorrelationSourceInput
+  | PortfolioSourceInput
+  | NewsSourceInput
+  | SentimentSourceInput
+  | TimeSourceInput
+  | CustomSourceInput;
 
 type WatchConditionInput =
   | {
@@ -174,40 +260,120 @@ const TimeScheduleObjectSchema = z.discriminatedUnion('kind', [
   }),
 ]);
 
+export const PriceSourceSchema = z.object({
+  type: z.literal('price'),
+  symbol: z.string().trim().min(1),
+  field: z.enum(['last', 'bid', 'ask', 'vwap', 'open', 'high', 'low', 'close']),
+}).catchall(z.unknown());
+
+export const IndicatorSourceSchema = z.object({
+  type: z.literal('indicator'),
+  symbol: z.string().trim().min(1),
+  timeframe: z.string().trim().min(1).optional(),
+  indicator: z.string().trim().min(1),
+  params: z.record(z.number().finite()),
+}).catchall(z.unknown());
+
+export const SpreadSourceSchema = z.object({
+  type: z.literal('spread'),
+  symbolA: z.string().trim().min(1),
+  symbolB: z.string().trim().min(1),
+  calc: z.enum(['ratio', 'diff', 'pct']),
+}).catchall(z.unknown());
+
+export const VolumeSourceSchema = z.object({
+  type: z.literal('volume'),
+  symbol: z.string().trim().min(1),
+  window: z.string().trim().min(1),
+}).catchall(z.unknown());
+
+export const OrderbookSourceSchema = z.object({
+  type: z.literal('orderbook'),
+  symbol: z.string().trim().min(1),
+  field: z.enum(['depth_imbalance', 'spread_pct', 'bid_wall', 'ask_wall']),
+}).catchall(z.unknown());
+
+export const VolatilitySourceSchema = z.object({
+  type: z.literal('volatility'),
+  symbol: z.string().trim().min(1),
+  window: z.string().trim().min(1),
+  calc: z.enum(['realized', 'atr', 'iv']),
+}).catchall(z.unknown());
+
+export const CorrelationSourceSchema = z.object({
+  type: z.literal('correlation'),
+  symbolA: z.string().trim().min(1),
+  symbolB: z.string().trim().min(1),
+  window: z.string().trim().min(1),
+}).catchall(z.unknown());
+
+export const PortfolioSourceSchema = z.object({
+  type: z.literal('portfolio'),
+  field: z.enum(['total_pnl', 'position_pnl', 'drawdown', 'exposure', 'unrealized_pnl']),
+  symbol: z.string().trim().min(1).optional(),
+}).catchall(z.unknown());
+
+export const NewsSourceSchema = z.object({
+  type: z.literal('news'),
+  keywords: z.array(z.string().trim().min(1)).min(1),
+  sources: z.array(z.string().trim().min(1)).optional(),
+}).catchall(z.unknown());
+
+export const SentimentSourceSchema = z.object({
+  type: z.literal('sentiment'),
+  subject: z.string().trim().min(1),
+  sources: z.array(z.string().trim().min(1)).optional(),
+  window: z.string().trim().min(1).optional(),
+  evalFrequency: z.string().trim().min(1),
+}).catchall(z.unknown());
+
 export const TimeSourceSchema = z.object({
   type: z.literal('time'),
   schedule: z.union([
-    z.string().min(1),
+    z.string().trim().min(1),
     TimeScheduleObjectSchema,
   ]),
 }).catchall(z.unknown());
 
 export const CustomSourceSchema = z.object({
   type: z.literal('custom'),
-  resolver: z.string().min(1),
+  resolver: z.string().trim().min(1),
   params: JsonRecordSchema,
 }).catchall(z.unknown());
 
-export const DataSourceSchema: z.ZodType<DataSourceInput> = BaseDataSourceSchema.superRefine((source, ctx) => {
-  if (source.type === 'time') {
-    const parsed = TimeSourceSchema.safeParse(source);
-    if (!parsed.success) {
-      for (const issue of parsed.error.issues) {
-        ctx.addIssue(issue);
-      }
-    }
+export const DataSourceSchema = BaseDataSourceSchema.superRefine((source, ctx) => {
+  const schemaByType: Record<string, z.ZodTypeAny> = {
+    price: PriceSourceSchema,
+    indicator: IndicatorSourceSchema,
+    spread: SpreadSourceSchema,
+    volume: VolumeSourceSchema,
+    orderbook: OrderbookSourceSchema,
+    volatility: VolatilitySourceSchema,
+    correlation: CorrelationSourceSchema,
+    portfolio: PortfolioSourceSchema,
+    news: NewsSourceSchema,
+    sentiment: SentimentSourceSchema,
+    time: TimeSourceSchema,
+    custom: CustomSourceSchema,
+  };
+
+  const schema = schemaByType[source.type];
+  if (!schema) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Unsupported source type: ${source.type}`,
+      path: ['type'],
+    });
     return;
   }
 
-  if (source.type === 'custom') {
-    const parsed = CustomSourceSchema.safeParse(source);
-    if (!parsed.success) {
-      for (const issue of parsed.error.issues) {
-        ctx.addIssue(issue);
-      }
+  const parsed = schema.safeParse(source);
+  if (!parsed.success) {
+    for (const issue of parsed.error.issues) {
+      ctx.addIssue(issue);
     }
   }
-});
+}) as unknown as z.ZodType<DataSourceInput>;
 
 export const WatchConditionSchema: z.ZodType<WatchConditionInput> = z.lazy(() =>
   z.discriminatedUnion('op', [

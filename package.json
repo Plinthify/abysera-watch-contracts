@@ -21,7 +21,7 @@
     "build": "tsup",
     "clean": "rm -rf dist",
     "prepare": "npm run build",
-    "test": "npm run build && node scripts/validate-normalized-time-schedules.mjs",
+    "test": "npm run build && node --test tests/*.test.mjs && node scripts/validate-normalized-time-schedules.mjs",
     "typecheck": "tsc --noEmit"
   },
   "engines": {
