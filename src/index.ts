@@ -2,14 +2,78 @@ import { z } from 'zod';
 
 export const JsonRecordSchema = z.record(z.unknown());
 
+const DURATION_UNIT_ALIASES = {
+  ms: 'ms',
+  msec: 'ms',
+  msecs: 'ms',
+  millisecond: 'ms',
+  milliseconds: 'ms',
+  s: 's',
+  sec: 's',
+  secs: 's',
+  second: 's',
+  seconds: 's',
+  m: 'm',
+  min: 'm',
+  mins: 'm',
+  minute: 'm',
+  minutes: 'm',
+  h: 'h',
+  hr: 'h',
+  hrs: 'h',
+  hour: 'h',
+  hours: 'h',
+  d: 'd',
+  day: 'd',
+  days: 'd',
+  w: 'w',
+  wk: 'w',
+  wks: 'w',
+  week: 'w',
+  weeks: 'w',
+} as const;
+
+type DurationUnit = keyof typeof DURATION_UNIT_ALIASES;
+
+function normalizeDurationString(value: string): string | null {
+  const match = value.trim().match(/^(\d+(?:\.\d+)?)\s*([a-z]+)$/i);
+  if (!match) {
+    return null;
+  }
+
+  const unit = DURATION_UNIT_ALIASES[match[2].toLowerCase() as keyof typeof DURATION_UNIT_ALIASES];
+  if (!unit) {
+    return null;
+  }
+
+  return `${match[1]}${unit}`;
+}
+
 type BaseDataSourceInput = {
   type: string;
   [key: string]: unknown;
 };
 
+type CronTimeScheduleInput = {
+  kind: 'cron';
+  expression: string;
+};
+
+type EveryTimeScheduleInput = {
+  kind: 'every';
+  interval: string;
+};
+
+type AtTimeScheduleInput = {
+  kind: 'at';
+  at: string;
+};
+
+type TimeScheduleInput = string | CronTimeScheduleInput | EveryTimeScheduleInput | AtTimeScheduleInput;
+
 type TimeSourceInput = {
   type: 'time';
-  schedule: string;
+  schedule: TimeScheduleInput;
 };
 
 type CustomSourceInput = {
@@ -95,9 +159,27 @@ const BaseDataSourceSchema = z.object({
   type: z.string().min(1),
 }).catchall(z.unknown());
 
+const TimeScheduleObjectSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('cron'),
+    expression: z.string().min(1),
+  }),
+  z.object({
+    kind: z.literal('every'),
+    interval: z.string().min(1),
+  }),
+  z.object({
+    kind: z.literal('at'),
+    at: z.string().datetime({ offset: true }),
+  }),
+]);
+
 export const TimeSourceSchema = z.object({
   type: z.literal('time'),
-  schedule: z.string().min(1),
+  schedule: z.union([
+    z.string().min(1),
+    TimeScheduleObjectSchema,
+  ]),
 }).catchall(z.unknown());
 
 export const CustomSourceSchema = z.object({
@@ -166,7 +248,7 @@ export const WatchTriggerSchema = z.object({
   fireOnce: z.boolean().optional(),
   activeWindow: z.object({
     days: z.array(z.string()).optional(),
-    hoursUTC: z.tuple([z.number().int(), z.number().int()]).optional(),
+    hoursUTC: z.array(z.number().int()).length(2).optional(),
   }).optional(),
 });
 
@@ -226,17 +308,61 @@ export function normalizeWatchTrigger<T extends Record<string, unknown>>(
   } as Omit<T, 'fireOnce'>;
 }
 
+function normalizeTimeSchedule(
+  schedule: TimeScheduleInput,
+): CronTimeScheduleInput | EveryTimeScheduleInput | AtTimeScheduleInput {
+  if (typeof schedule === 'string') {
+    return {
+      kind: 'cron',
+      expression: schedule.trim(),
+    };
+  }
+
+  switch (schedule.kind) {
+    case 'cron':
+      return {
+        kind: 'cron',
+        expression: schedule.expression.trim(),
+      };
+    case 'every':
+      return {
+        kind: 'every',
+        interval: normalizeDurationString(schedule.interval) ?? schedule.interval.trim(),
+      };
+    case 'at':
+      return {
+        kind: 'at',
+        at: new Date(schedule.at).toISOString(),
+      };
+  }
+}
+
+function normalizeTimeSource<T extends Record<string, unknown>>(source: T): T {
+  if (source.type !== 'time' || !('schedule' in source)) {
+    return source;
+  }
+
+  const schedule = (source as unknown as { schedule: TimeScheduleInput }).schedule;
+  return {
+    ...source,
+    schedule: normalizeTimeSchedule(schedule),
+  } as T;
+}
+
 export function normalizeWatchSpec<T extends Record<string, unknown>>(
   spec: T,
 ): T {
   const trigger = spec.trigger;
-  if (!trigger || typeof trigger !== 'object' || Array.isArray(trigger)) {
-    return spec;
-  }
+  const source = spec.source;
 
   return {
     ...spec,
-    trigger: normalizeWatchTrigger(trigger as Record<string, unknown>),
+    ...(source && typeof source === 'object' && !Array.isArray(source)
+      ? { source: normalizeTimeSource(source as Record<string, unknown>) }
+      : {}),
+    ...(trigger && typeof trigger === 'object' && !Array.isArray(trigger)
+      ? { trigger: normalizeWatchTrigger(trigger as Record<string, unknown>) }
+      : {}),
   } as T;
 }
 
