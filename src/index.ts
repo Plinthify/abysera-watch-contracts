@@ -2,6 +2,102 @@ import { z } from 'zod';
 
 export const JsonRecordSchema = z.record(z.unknown());
 
+export const DeliveryProfileProviderSchema = z.enum(['openclaw', 'hermes_webhook']);
+export const DeliveryProfileStatusSchema = z.enum(['needs_validation', 'validated', 'invalid', 'disabled']);
+export const DeliveryValidationChallengeStatusSchema = z.enum(['pending', 'validated', 'failed', 'expired']);
+
+export const HermesWebhookDeliveryConfigSchema = z.object({
+  url: z.string().url(),
+  secret: z.string().min(1),
+  timeoutMs: z.number().int().positive().max(120_000).optional(),
+}).strict();
+
+export const OpenClawDeliveryConfigSchema = z.object({
+  url: z.string().url(),
+  token: z.string().min(1).optional(),
+  senderName: z.string().min(1).optional(),
+  wakeMode: z.string().min(1).optional(),
+  deliver: z.boolean().optional(),
+  channel: z.string().min(1).optional(),
+  timeoutMs: z.number().int().positive().max(120_000).optional(),
+}).strict();
+
+export const DeliveryProfileConfigSchema = z.discriminatedUnion('provider', [
+  z.object({
+    provider: z.literal('hermes_webhook'),
+    config: HermesWebhookDeliveryConfigSchema,
+  }).strict(),
+  z.object({
+    provider: z.literal('openclaw'),
+    config: OpenClawDeliveryConfigSchema,
+  }).strict(),
+]);
+
+export const DeliveryProfileSchema = z.object({
+  id: z.string().min(1),
+  agentId: z.string().min(1),
+  label: z.string().trim().min(1),
+  isDefault: z.boolean(),
+  status: DeliveryProfileStatusSchema,
+  provider: DeliveryProfileProviderSchema,
+  config: z.union([HermesWebhookDeliveryConfigSchema, OpenClawDeliveryConfigSchema]),
+  lastValidatedAt: z.string().datetime({ offset: true }).nullable().optional(),
+  lastValidationError: z.string().min(1).nullable().optional(),
+  lastChallengeId: z.string().min(1).nullable().optional(),
+  createdAt: z.string().datetime({ offset: true }).optional(),
+  updatedAt: z.string().datetime({ offset: true }).optional(),
+}).superRefine((profile, ctx) => {
+  const parsed = DeliveryProfileConfigSchema.safeParse({
+    provider: profile.provider,
+    config: profile.config,
+  });
+
+  if (!parsed.success) {
+    for (const issue of parsed.error.issues) {
+      ctx.addIssue({
+        ...issue,
+        path: ['config', ...issue.path.slice(1)],
+      });
+    }
+  }
+});
+
+export const DeliveryProfileUpsertSchema = z.object({
+  id: z.string().min(1).optional(),
+  agentId: z.string().min(1),
+  label: z.string().trim().min(1),
+  isDefault: z.boolean().optional(),
+  provider: DeliveryProfileProviderSchema,
+  config: z.union([HermesWebhookDeliveryConfigSchema, OpenClawDeliveryConfigSchema]),
+}).superRefine((profile, ctx) => {
+  const parsed = DeliveryProfileConfigSchema.safeParse({
+    provider: profile.provider,
+    config: profile.config,
+  });
+
+  if (!parsed.success) {
+    for (const issue of parsed.error.issues) {
+      ctx.addIssue({
+        ...issue,
+        path: ['config', ...issue.path.slice(1)],
+      });
+    }
+  }
+});
+
+export const DeliveryProfileValidationChallengeSchema = z.object({
+  id: z.string().min(1),
+  profileId: z.string().min(1),
+  agentId: z.string().min(1),
+  status: DeliveryValidationChallengeStatusSchema,
+  nonce: z.string().min(1),
+  requestedAt: z.string().datetime({ offset: true }),
+  expiresAt: z.string().datetime({ offset: true }),
+  completedAt: z.string().datetime({ offset: true }).nullable().optional(),
+  error: z.string().min(1).nullable().optional(),
+  metadata: JsonRecordSchema.optional(),
+});
+
 const DURATION_UNIT_ALIASES = {
   ms: 'ms',
   msec: 'ms',
@@ -430,6 +526,7 @@ export const WatchSpecSchema = z.object({
   expiresAt: z.string().datetime().nullable().optional(),
   priority: z.enum(['low', 'medium', 'high', 'critical']),
   label: z.string().optional(),
+  deliveryProfileId: z.string().min(1).optional(),
   source: DataSourceSchema,
   condition: WatchConditionSchema,
   trigger: WatchTriggerSchema,
