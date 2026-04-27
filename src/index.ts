@@ -497,10 +497,11 @@ export const WatchExecutionSchema = z.discriminatedUnion('mode', [
   z.object({
     mode: z.literal('wake_agent'),
   }),
-  z.object({
-    mode: z.literal('execute_immediately'),
-    action: ActionSchema,
-  }),
+  // execute_immediately will be added back with the next trade sauce refactor
+  // z.object({
+  //   mode: z.literal('execute_immediately'),
+  //   action: ActionSchema,
+  // }),
 ]);
 
 export const WatchTriggerSchema = z.object({
