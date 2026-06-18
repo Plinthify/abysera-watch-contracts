@@ -1,4 +1,17 @@
-name: Deploy watch-contracts
+# abysera-watch-contracts — Library Build & Verify Workflow
+# Triggers: workflow_dispatch (manual), release published, tags v*
+#
+# This is a shared library (no PM2 runtime). The workflow builds and verifies
+# the package on the services host so downstream services can consume the
+# built artifact from ~/abysera/packages/abysera-watch-contracts/dist.
+#
+# No PM2 restart, no health check — libraries have no runtime process.
+# Uses the GitHub App installation token (github.token) for clone auth,
+# consistent with the service deploy workflows.
+#
+# Linear: PLI-13
+
+name: Deploy Abysera Watch Contracts
 
 on:
   workflow_dispatch:
@@ -29,6 +42,12 @@ permissions:
   id-token: write
   contents: read
 
+env:
+  SERVICE_NAME: abysera-watch-contracts
+  SERVICE_PATH: packages/abysera-watch-contracts
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: '497077511223'
+
 concurrency:
   group: deploy-${{ github.event.inputs.environment || (github.ref_type == 'tag' && 'prod') || 'dev' }}
   cancel-in-progress: false
@@ -42,25 +61,33 @@ jobs:
         id: params
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
-            echo "ref=${{ github.event.inputs.ref }}" >> $GITHUB_OUTPUT
+            environment="${{ github.event.inputs.environment }}"
+            ref="${{ github.event.inputs.ref }}"
           elif [ "${{ github.event_name }}" = "release" ]; then
-            echo "environment=prod" >> $GITHUB_OUTPUT
-            echo "ref=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+            environment="prod"
+            ref="${{ github.event.release.tag_name }}"
           elif [ "${{ github.event_name }}" = "push" ]; then
             if [ "${{ github.ref_type }}" = "tag" ]; then
-              echo "environment=prod" >> $GITHUB_OUTPUT
-              echo "ref=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+              environment="prod"
+              ref="${{ github.ref_name }}"
             else
-              echo "environment=dev" >> $GITHUB_OUTPUT
-              echo "ref=${{ github.sha }}" >> $GITHUB_OUTPUT
+              environment="dev"
+              ref="${{ github.sha }}"
             fi
+          else
+            echo "Unsupported event: ${{ github.event_name }}" >&2
+            exit 1
           fi
 
-          echo "service_name=abysera-watch-contracts" >> $GITHUB_OUTPUT
-          echo "service_path=watch-contracts" >> $GITHUB_OUTPUT
-          echo "pm2_name=watch-contracts" >> $GITHUB_OUTPUT
-          echo "port=8080" >> $GITHUB_OUTPUT
+          if [ "$environment" = "prod" ]; then
+            case "$ref" in
+              v*) ;;
+              *) echo "Production deploys must use an immutable v* tag." >&2; exit 1 ;;
+            esac
+          fi
+
+          echo "environment=$environment" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -70,41 +97,135 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::497077511223:role/abysera-${{ steps.params.outputs.environment }}-github-deploy-role
-          aws-region: us-east-1
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/abysera-${{ steps.params.outputs.environment }}-github-deploy-role
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Deploy via SSM
+      - name: Get target host instance ID
+        id: host
         run: |
-          echo "Deploying abysera-watch-contracts to ${ steps.params.outputs.environment }..."
-
-          INSTANCE_ID=$(aws ssm get-parameter \
-            --name "/abysera/${{ steps.params.outputs.environment }}/services-host-instance-id" \
-            --query "Parameter.Value" \
+          DEPLOY_ENVIRONMENT="${{ steps.params.outputs.environment }}"
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters \
+              "Name=tag:Name,Values=abysera-${DEPLOY_ENVIRONMENT}-services" \
+              "Name=instance-state-name,Values=running" \
+            --query "Reservations[].Instances[].InstanceId" \
             --output text)
+
+          COUNT=$(printf '%s\n' "$INSTANCE_ID" | wc -w | tr -d ' ')
+          if [ -z "$INSTANCE_ID" ] || [ "$COUNT" -ne 1 ]; then
+            echo "Expected exactly one running services host for ${DEPLOY_ENVIRONMENT}; got: ${INSTANCE_ID:-none}" >&2
+            exit 1
+          fi
+
+          echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Build & verify on services host
+        env:
+          DEPLOY_ENVIRONMENT: ${{ steps.params.outputs.environment }}
+          DEPLOY_REF: ${{ steps.params.outputs.ref }}
+          INSTANCE_ID: ${{ steps.host.outputs.instance_id }}
+          GITHUB_TOKEN_FOR_CLONE: ${{ github.token }}
+        run: |
+          echo "Building ${{ env.SERVICE_NAME }}@${DEPLOY_REF} on ${DEPLOY_ENVIRONMENT} host ${INSTANCE_ID} ..."
+
+          python3 <<'PY'
+          import base64
+          import json
+          import os
+          import shlex
+
+          environment = os.environ['DEPLOY_ENVIRONMENT']
+          deploy_ref = os.environ['DEPLOY_REF']
+          github_token = os.environ['GITHUB_TOKEN_FOR_CLONE']
+          repo = os.environ['GITHUB_REPOSITORY']
+          service_dir = '/home/ubuntu/abysera/packages/abysera-watch-contracts'
+          repo_url = f'https://x-access-token:{github_token}@github.com/{repo}.git'
+          safe_repo_url = f'https://github.com/{repo}.git'
+
+          script = '#!/usr/bin/env bash\n'
+          script += 'set -euo pipefail\n\n'
+          script += 'export HOME=/home/ubuntu\n\n'
+          script += f'DEPLOY_REF={shlex.quote(deploy_ref)}\n'
+          script += f'SERVICE_DIR={shlex.quote(service_dir)}\n'
+          script += f'REPO_URL={shlex.quote(repo_url)}\n'
+          script += f'SAFE_REPO_URL={shlex.quote(safe_repo_url)}\n\n'
+          script += r'''echo "=== step 1: clone or update $SERVICE_DIR ==="
+          if [ -d "$SERVICE_DIR/.git" ]; then
+            cd "$SERVICE_DIR"
+            git remote set-url origin "$REPO_URL"
+            git fetch --tags origin
+          else
+            mkdir -p "$(dirname "$SERVICE_DIR")"
+            git clone "$REPO_URL" "$SERVICE_DIR"
+            cd "$SERVICE_DIR"
+            git fetch --tags origin
+          fi
+
+          if git ls-remote --exit-code --heads origin "$DEPLOY_REF" >/dev/null 2>&1; then
+            git fetch origin "$DEPLOY_REF"
+            git checkout -B "$DEPLOY_REF" FETCH_HEAD
+          else
+            git checkout --force "$DEPLOY_REF"
+          fi
+          git remote set-url origin "$SAFE_REPO_URL"
+
+          echo "=== step 2: npm ci ==="
+          npm ci
+
+          echo "=== step 3: typecheck ==="
+          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts['typecheck'] ? 0 : 1)"; then
+            npm run typecheck
+          else
+            echo "No typecheck script present; skipping."
+          fi
+
+          echo "=== step 4: build ==="
+          npm run build
+
+          echo "=== step 5: test (if present) ==="
+          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts['test'] ? 0 : 1)"; then
+            npm test
+          else
+            echo "No test script present; skipping."
+          fi
+
+          echo "Library build & verify complete. Artifact available at $SERVICE_DIR/dist"
+          '''
+
+          payload = base64.b64encode(script.encode()).decode()
+          commands = [
+              "cat > /tmp/deploy-abysera-watch-contracts.b64 <<'DEPLOY_B64'\n" + payload + "\nDEPLOY_B64\nbase64 -d /tmp/deploy-abysera-watch-contracts.b64 > /tmp/deploy-abysera-watch-contracts.sh\nchmod 700 /tmp/deploy-abysera-watch-contracts.sh\nbash /tmp/deploy-abysera-watch-contracts.sh"
+          ]
+          with open('ssm-params.json', 'w', encoding='utf-8') as fh:
+              json.dump({'commands': commands}, fh)
+          PY
 
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
-            --comment "Deploy abysera-watch-contracts" \
-            --parameters "commands=[
-              \"cd /home/ubuntu/abysera/services/watch-contracts\",
-              \"git fetch origin\",
-              \"git checkout ${{ steps.params.outputs.ref }}\",
-              \"git pull origin ${{ steps.params.outputs.ref }}\",
-              \"npm install\",
-              \"npm run build 2>/dev/null || true\",
-              \"HOME=/home/ubuntu PM2_HOME=/home/ubuntu/.pm2 pm2 restart watch-contracts || HOME=/home/ubuntu PM2_HOME=/home/ubuntu/.pm2 pm2 start ecosystem.config.js --only watch-contracts\"
-            ]" \
+            --comment "Build ${{ env.SERVICE_NAME }} ${DEPLOY_REF} on ${DEPLOY_ENVIRONMENT}" \
+            --parameters file://ssm-params.json \
             --query "Command.CommandId" \
             --output text)
 
           echo "Command ID: $COMMAND_ID"
 
-          aws ssm wait command-executed \
-            --command-id "$COMMAND_ID" \
-            --instance-id "$INSTANCE_ID"
+          terminal_status=""
+          for _ in $(seq 1 90); do
+            terminal_status=$(aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query Status \
+              --output text 2>/dev/null || true)
+            case "$terminal_status" in
+              Success|Failed|Cancelled|TimedOut|Cancelling) break ;;
+            esac
+            sleep 10
+          done
 
           aws ssm get-command-invocation \
             --command-id "$COMMAND_ID" \
             --instance-id "$INSTANCE_ID" \
             --query "{Status:Status,Output:StandardOutputContent,Error:StandardErrorContent}"
+
+          test "$terminal_status" = "Success"
